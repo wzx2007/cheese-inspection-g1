@@ -28,7 +28,7 @@
 
 Key 放在 ``voice/.env``::
 
-    DASHSCOPE_API_KEY=sk-xxxxxxxx
+    DASHSCOPE_API_KEY=sk-REPLACE_ME
 
 或者环境变量 ``DASHSCOPE_API_KEY``。**不要把 key 写进代码或提交到 git。**
 
@@ -281,7 +281,8 @@ def main(argv=None) -> int:
         return 2
 
     if not cfg.ready():
-        print("没有 API key。先写 voice/.env：DASHSCOPE_API_KEY=sk-xxx", file=sys.stderr)
+        print("没有 API key。先写 voice/.env：DASHSCOPE_API_KEY=<你的 DashScope Key>",
+              file=sys.stderr)
         return 2
 
     from voice.assistant import Assistant, WAKE_WORD

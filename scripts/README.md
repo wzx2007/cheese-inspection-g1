@@ -490,11 +490,12 @@ python3 ask.py --voice --wake-engine text   # 退回老版"识别文本里找星
 **Key 放在 `voice/.env`**（照 `voice/.env.example` 抄一份）：
 
 ```bash
-DASHSCOPE_API_KEY=sk-xxxxxxxx
+DASHSCOPE_API_KEY=sk-REPLACE_ME      # 换成自己的真实 key（sk- + 32 位十六进制）
 ```
 
 或者环境变量 `DASHSCOPE_API_KEY`。优先级：`--api-key` > 环境变量 >
-`voice/xingbao.json` > `voice/.env`。**别把 key 写进代码。**
+`voice/xingbao.json` > `voice/.env`。**别把 key 写进代码**——仓库是公开的，
+推之前跑一下 `python scripts/check_secrets.py` 自检。
 
 | 模块 | 作用 |
 | --- | --- |

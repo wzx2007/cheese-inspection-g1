@@ -1051,7 +1051,7 @@ def main(argv=None):
         cfg = cloud.CloudConfig.from_file()
         if not cfg.ready():
             print("没有 API key，语音问答会退化成本地兜底。先写 voice/.env："
-                  "DASHSCOPE_API_KEY=sk-xxx", file=sys.stderr)
+                  "DASHSCOPE_API_KEY=<你的 DashScope Key>", file=sys.stderr)
 
         assistant = Assistant(
             robot,
