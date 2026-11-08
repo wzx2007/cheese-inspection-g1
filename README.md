@@ -330,10 +330,10 @@ print(len(h.upload_tree(r'CheeseBot/scripts','/home/galbot/scripts'))); h.close(
 
 命令行：`--debug` `--no-vision` `--no-voice` `--vision-frames N` `--volume 0-100` `--runs-dir` `--backoff M` `--max-lastmile M` `--no-route` `--count-mode` `--tool`。
 
-导航的其余旋钮（`direct_first` / `stall_timeout_s` / `skip_global_m` / `arrive_tol_m` /
-`status_grace_s` / `pose_jump_m` / `relocalize_retries` / `navigate_budget_s`）都在
-`ChassisNavigator.__init__` 的默认值里，改之前先读 7.1——它们每一条都是为了**不要**和
-规划器抢方向盘。
+导航的其余旋钮（`direct_first` / `stall_timeout_s` / `refuse_grace_s` / `skip_global_m` /
+`arrive_tol_m` / `status_grace_s` / `pose_jump_m` / `relocalize_retries` /
+`navigate_budget_s`）都在 `ChassisNavigator.__init__` 的默认值里，改之前先读 7.1——它们
+每一条都是为了**不要**和规划器抢方向盘。
 
 ## 7.1 导航：直接把终点交给规划器
 
@@ -356,6 +356,24 @@ print(len(h.upload_tree(r'CheeseBot/scripts','/home/galbot/scripts'))); h.close(
 作用：对同一个点重派，规划器拿同一张图、同一个起点，结论必然一样。现在这层重试整个删了
 （`stage1_retries` 形参只为兼容老调用方保留，值不再被读取），卡死判定也从 20 s 压到 8 s
 （现场卡住时位姿是 0.000 变化，2 s 一个采样，8 s 足够确诊且不再空站）。
+
+### 认出"规划器根本给不出路"（`REFUSED`）
+
+2026-11-08 真机探针测出来的事实：`navigate_to_goal` 是**同步**返回的，而且它拒绝时也
+照样回 `(True, 'SUCCESS')`——`0.5 s` 后状态才变成 `FAILED`，车一动没动。原来我们既不看
+返回值、又要等 6 s 宽容期和 8 s 卡死看门狗，**每换一档候选就白烧 8 s**，6 档 = 49.8 s。
+
+现在把"拒了"和"走着走着抖一下"分开判，靠的是**车动没动**：
+
+| 情况 | 判据 | 结果 |
+| --- | --- | --- |
+| 派活当场返回 `False` | 返回值 | 立刻 `REFUSED`，不等 |
+| 车一动没动（离派活点 < 0.12 m）+ 状态一直非 RUNNING | 持续 `refuse_grace_s`（1.5 s） | `REFUSED`，换下一档 |
+| 车动过之后再报错 | 持续 `status_grace_s`（6 s）+ 确实停住 | 才认输（这才是真失败） |
+
+再加一条省时规则：**终点和第一个预停位都被拒，而剩下的路在 `max_lastmile_m`（2.5 m）以内
+→ 不再换点，直接交给直线补位**。真机实测：6 档全被拒、白花 49.8 s，而 5.7 s 的补位把车
+送到位（误差 0.037 m）——那 6 档纯属仪式。
 
 到了终点之后，如果**全局导航已判定到达、但真位姿与终点还差一点点**（`pos_err ≤
 arrive_tol_m 0.22 m`），才用 `move_straight_to` 按 odom 小步（0.2 m/步）把最后那截补进去。
@@ -383,7 +401,8 @@ arrive_tol_m 0.22 m`），才用 `move_straight_to` 按 odom 小步（0.2 m/步�
 | `direct_first` | True | 终点是否排候选第一档（关掉才回到"预停位优先"的旧顺序） |
 | `skip_global_m` | 0.5 | 离终点小于这个距离就不再走全局导航 |
 | `arrive_tol_m` | 0.22 | 判定"到了"的位置容差（自愈阈值同源） |
-| `status_grace_s` | 6.0 | 非 RUNNING 状态要持续这么久才认输 |
+| `status_grace_s` | 6.0 | 车**动过**之后，非 RUNNING 要持续这么久才认输 |
+| `refuse_grace_s` | 1.5 | 车**一动没动**时，非 RUNNING 持续这么久就判"规划器给不出路" |
 | `stall_timeout_s` | 8.0 | 车 0.10 m / 5° 都没动满这么久就判"卡住"（原 20 s） |
 | `pose_jump_m` / `pose_jump_deg` | 1.5 / 60 | 位姿突变的判定门槛 |
 | `relocalize_retries` | 2 | 定位跳变后重规划同一目标的最多次数 |
@@ -408,7 +427,8 @@ arrive_tol_m 0.22 m`），才用 `move_straight_to` 按 odom 小步（0.2 m/步�
 | 导航报"到位误差超限，正在自愈" | 全局那段成了，但真位姿离终点还差一点 | 看日志里的 `位置误差 / 朝向误差`；重录 `nav_goals/table.json`。自愈会用新坐标再重规划一次，最多两次 |
 | 导航日志每趟第一句就是"直接导航到终点（一次派活，和 demo_flow 一样）" | 这是**新顺序**：终点永远第一档，预检不再当闸门 | 不用管。看到它之后直接到位就是正常；只有在它后面才可能出现预停位 |
 | "直接导航到终点"被拒（`COLLISION` / `CLOSE_TO_OBSTACLE`），接着"预停位后退 0.8 m" | 终点在障碍膨胀区（建图起点就贴着奶酪桌），直连确实被规划器顶回来了 | 正常兜底：会自动退预停位（最多 6 档，0.8→1.2 m），再不行兜底重试终点；全被拒才需要把车往外挪半米，或 `--backoff 1.5` |
-| 日志里状态突然 `FAILED`，但车还在走 | SDK 丢了任务结果（`has unknow task result`），状态是假的 | 不用管：现在要连续 6 s 不走才认输，最终看真位姿 |
+| 日志里状态突然 `FAILED`，但车还在走 | SDK 丢了任务结果（`has unknow task result`），状态是假的 | 不用管：车动过才走 6 s 宽容期，最终看真位姿 |
+| 每档都打"状态 FAILED 且车一动没动，判规划器给不出路" | 规划器从当前位姿解不出可执行的路（多半是车自己贴在障碍膨胀区里，或定位飘了） | 前几档这样然后靠"直线补位"到位属正常；**每一档都这样且位置误差好几米**，说明车不在自己以为的地方——看 `当前位姿` 对不对，重新对位（重定位）再说 |
 | "定位跳变 6.87 m，正在重规划" | 重定位/里程计跳变，剩余距离会瞬间变得离谱 | 不用管：会丢弃那段 odom、用新坐标重规划同一目标（最多 2 次），期间播报"定位飘了一下" |
 | 车原地来回小幅摆动不收敛 | 预停位正好压在膨胀区边缘，规划器反复解不出可行腿 | 手动把车挪开 0.5 m 重新发起；或 `--backoff` 给一个更远的起点 |
 | `switch_controller` 失败 | 没切回 `LEG_PVT_CTRL` | 导航后必须切回才能升降 |
@@ -424,6 +444,11 @@ arrive_tol_m 0.22 m`），才用 `move_straight_to` 按 odom 小步（0.2 m/步�
   "卡住才原地重派一次"；③ `stall_timeout_s` 20 s → 8 s；④ 预停位扫描收窄到 0.8/1.0/1.2 m
   且默认不做横移。回归 `test_nav_fast.py` 8 组、`test_nav_field_jump.py` 9 组、
   `test_nav_second_run.py` 全过。
+- **2026-11-08** 导航"认出规划器给不出路"（真机探针测出来的）：`navigate_to_goal` 拒绝时
+  也回 `(True,'SUCCESS')`，0.5 s 后状态才 `FAILED`、车一动不动。于是 ⑤ 新增 `REFUSED`：
+  派活返回 `False` 或"车一动没动 + 状态持续非 RUNNING 1.5 s"就立刻换档，不再等 8 s 看门狗；
+  ⑥ 终点和第一个预停位都被拒、且剩余 ≤ `max_lastmile_m` 时不再换点，直接交给直线补位。
+  真机两次实测：同样"全被拒"的环境下，一趟从 58.9 s 降到 ~15 s 量级。回归加到 10 组。
 - **2026-11-08** 结果播报改成**按面四选一**：原来的 `result_pass/fail` 两支台词是
   "检测完成，表面未发现明显异常"，不提正反面，6 个面连续播报时听不出说的哪一面。
   换成 `front_ok/front_bad/back_ok/back_bad` 四支（台词对齐 `demo_flow.py`：

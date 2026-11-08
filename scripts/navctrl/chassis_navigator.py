@@ -126,6 +126,7 @@ class ChassisNavigator:
         yaw_tol_deg: float = 4.0,
         arrive_tol_m: float = 0.22,
         status_grace_s: float = 6.0,
+        refuse_grace_s: float = 1.5,
         pose_jump_m: float = 1.5,
         pose_jump_deg: float = 60.0,
         relocalize_retries: int = 2,
@@ -173,6 +174,11 @@ class ChassisNavigator:
         # （2026-11-08 现场：4.0s FAILED，8.0s 又跑到 1 m 外）。
         # 所以"非 RUNNING"必须连续持续这么久、且车确实没动，才认输。
         self.status_grace_s = float(status_grace_s)
+        # "派活之后车一动没动、状态却已经报错" = 规划器给不出可执行的路。
+        # 2026-11-08 真机探针：navigate_to_goal 回 (True,'SUCCESS')，0.5 s 后
+        # 状态就是 FAILED，车一动不动。这种情况没必要等 6 s 宽容期，更没必要
+        # 等 8 s 卡死看门狗 —— 换档去试别的点，或者干脆交给直线补位。
+        self.refuse_grace_s = float(refuse_grace_s)
         self.pose_jump_m = float(pose_jump_m)
         self.pose_jump_deg = float(pose_jump_deg)
         self.relocalize_retries = int(relocalize_retries)
@@ -426,6 +432,7 @@ class ChassisNavigator:
             tried = 0
             any_reachable = False
             relocalized = 0
+            refused = 0
             for target, along, lateral, reachable in _candidates():
                 tried += 1
                 any_reachable = any_reachable or bool(reachable)
@@ -458,10 +465,19 @@ class ChassisNavigator:
                     break
                 if arrived:
                     break
-                if status in TOO_CLOSE_STATUS:
-                    # 预停位落在障碍膨胀区边缘：别原地重试，往后挪一档再规划。
-                    # 这里只做个短停稳 —— 规划器是在派活阶段就拒了，车基本没动。
-                    print("  规划器嫌太近（{}），换更远的预停位".format(status))
+                if status in TOO_CLOSE_STATUS or status == "REFUSED":
+                    # 规划器在派活那一刻就拒了，车一动没动 —— 换一档再试。
+                    refused += 1
+                    print("  规划器不给路（{}），换下一档".format(status))
+                    # 终点 + 第一个预停位都被拒，而剩下的路 odom 补位能走完：
+                    # 再换多少档都是同一张图、同一个起点，结论必然一样。
+                    # 2026-11-08 真机实测：6 档全被拒，白花 49.8 s，最后是
+                    # 5.7 s 的直线补位把车送到的（误差 0.037 m）。
+                    now_gap = math.hypot(goal[0] - self.pose()[0], goal[1] - self.pose()[1])
+                    if refused >= 2 and now_gap <= self.max_lastmile_m:
+                        print("  终点和预停位都拒了（剩 {:.2f} m 在补位上限 {:.2f} m 内），"
+                              "不再换点，直接交给直线补位".format(now_gap, self.max_lastmile_m))
+                        break
                     t0 = time.time()
                     self._settle(timeout_s=1.5, quiet_s=0.4)
                     t_wait += time.time() - t0
@@ -651,6 +667,11 @@ class ChassisNavigator:
         现场日志里每一次"重试 1/1"都是同样的 COLLISION，白花 8 s 才往下走。
         外层本来就有 5 档候选（终点直连 + 3 个预停位 + 再试终点），
         把时间留给换点，比在同一格上磕两次划算。
+
+        ``REFUSED``（2026-11-08 真机日志后加）：``navigate_to_goal`` 是**同步**
+        返回 ``(ok, msg)`` 的，规划器不给路时它当场就回 ``False``。原来我们不看
+        这个返回值，于是还要等 8 s 的卡死看门狗才认输 —— 现场 6 档候选白白吃掉
+        49.8 s，最后是 5.7 s 的直线补位把车送到的。现在当场拒就当场返回。
         """
         status = "?"
         stall_retried = False
@@ -659,13 +680,22 @@ class ChassisNavigator:
         while True:
             self._announce_move()
             self._forget_pose()           # 重新派活，位姿基线重取
-            self._nav.navigate_to_goal(
-                target,
-                enable_collision_check=True,
-                is_blocking=False,
-                timeout=self.timeout_s,
-                omni_plan=False,
-            )
+            try:
+                accepted, message = self._nav.navigate_to_goal(
+                    target,
+                    enable_collision_check=True,
+                    is_blocking=False,
+                    timeout=self.timeout_s,
+                    omni_plan=False,
+                )
+            except Exception as exc:                      # noqa: BLE001
+                print("  派活失败（{}）：{}".format(type(exc).__name__, exc))
+                return False, "DISPATCH_FAILED"
+            if accepted is False:
+                # 规划器连任务都没接（COLLISION / 目标在膨胀区 / 车自己贴障碍）。
+                # 车一动没动，等下去也没有意义。
+                print("  ✗ 规划器当场拒绝：{}".format(message))
+                return False, "REFUSED"
             arrived, elapsed, status = self._wait_arrival("第一段")
             if arrived:
                 return True, "ARRIVED"
@@ -698,13 +728,23 @@ class ChassisNavigator:
           才认输（重规划瞬间的假 FAILED 过不了这一关）；
         - 位姿跳变 -> 返回 ``RELOCALIZED``，让上层拿新坐标重新规划，
           **不是**拿跳变后的距离判死刑。
+
+        ``REFUSED``（2026-11-08 真机探针后加）：派活那一下 SDK 回
+        ``(True, 'SUCCESS')``，可 0.5 s 后状态就已经是 ``FAILED``、车一动不动 ——
+        这是"规划器给了个跑不起来的任务"，和"走着走着抖一下"完全是两回事。
+        区别就在**车动没动**：动过才需要 6 s 的宽容期；一动没动又已经报错，
+        ``refuse_grace_s`` 一到就认，别白等 8 s 的卡死看门狗。
         """
         started = time.time()
         last_print = 0.0
-        anchor = self.pose()
+        last_status_at = 0.0
+        origin = self.pose()
+        anchor = origin
         anchor_at = started
         goal_pose = getattr(self, "_current_goal", None)
         bad_since = None
+        moved_away = False
+        name = "?"
         while time.time() - started < self.timeout_s:
             if self._nav.check_goal_arrival():
                 return True, time.time() - started, "ARRIVED"
@@ -729,14 +769,38 @@ class ChassisNavigator:
             )
             if not stuck:
                 anchor, anchor_at = current, now
-            elif now - anchor_at > self.stall_timeout_s:
+            if math.hypot(current[0] - origin[0], current[1] - origin[1]) > 0.12:
+                moved_away = True
+            if stuck and now - anchor_at > self.stall_timeout_s:
                 print("    {:5.1f}s {} 卡住 {} s 没挪窝，停车重规划".format(
                     now - started, label, int(now - anchor_at)))
                 return False, now - started, "STALLED"
-            if now - last_print > 2.0:
-                last_print = now
+            # 状态单独按 0.5 s 采样：拒绝要认得早，日志仍按 2 s 打
+            if now - last_status_at >= 0.5:
+                last_status_at = now
                 status = self._nav.get_navigation_status()
                 name = getattr(status, "name", str(status))
+                if name in ("RUNNING", "UNKNOWN", "?"):
+                    bad_since = None
+                elif bad_since is None:
+                    # 不立刻认输：重规划那一瞬间也会报 FAILED。
+                    bad_since = now
+                elif not moved_away:
+                    # 一动没动 + 一直在报错 = 这个目标规划器跑不了，早收手
+                    if now - bad_since >= self.refuse_grace_s:
+                        print("    {:5.1f}s {} 状态 {} 且车一动没动（{:.2f} m），"
+                              "判规划器给不出路".format(
+                                  now - started, label, name,
+                                  math.hypot(current[0] - origin[0],
+                                             current[1] - origin[1])))
+                        return False, now - started, "REFUSED"
+                elif now - bad_since >= self.status_grace_s and stuck:
+                    # 车动过之后再报错：宽容期要长（重规划瞬间的假 FAILED）
+                    print("    {} 状态 {} 已经持续 {:.0f}s 且车没动，认输".format(
+                        label, name, now - bad_since))
+                    return False, now - started, name
+            if now - last_print > 2.0:
+                last_print = now
                 print(
                     "    {:5.1f}s {} x={:.3f} y={:.3f} yaw={:.1f} status={}".format(
                         now - started,
@@ -747,16 +811,6 @@ class ChassisNavigator:
                         name,
                     )
                 )
-                if name not in ("RUNNING", "UNKNOWN", "?"):
-                    # 不立刻认输：重规划那一瞬间也会报 FAILED。
-                    if bad_since is None:
-                        bad_since = now
-                    elif now - bad_since >= self.status_grace_s and stuck:
-                        print("    {} 状态 {} 已经持续 {:.0f}s 且车没动，认输".format(
-                            label, name, now - bad_since))
-                        return False, now - started, name
-                else:
-                    bad_since = None
             time.sleep(0.2)
         return False, self.timeout_s, "TIMEOUT"
 
