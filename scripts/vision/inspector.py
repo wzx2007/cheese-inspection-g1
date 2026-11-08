@@ -10,9 +10,9 @@
    要 ``robot.init({SensorType.HEAD_LEFT_CAMERA})`` 才拿得到图。
 3. **看不清就不要下结论**。分不出奶酪时输出"看不到奶酪"，
    既不判有霉也不判没霉，避免把"没对准"说成"干净"。
-4. **判完立刻播报当时的结果**（2026-11-08 现场要求）：没霉 -> PASS、
-   有霉 -> FAIL，各一支音频。播报是非阻塞的，手臂可以同时继续走动作。
-   音频台词已用 ASR 核对过（见 ``announce`` 的注释），别再搞反。
+4. **判完立刻播报当时的结果**（2026-11-08 现场要求）：四支音频，按"哪一面 ×
+   正常/不正常"选一支。播报是非阻塞的，手臂可以同时继续走动作。
+   音频台词已用 ASR 逐支核对过（见 ``announce`` 的注释），别再搞反。
 """
 
 from __future__ import annotations
@@ -28,8 +28,24 @@ import numpy as np
 
 from . import config, mold
 
-VOICE_PASS = "pass"
-VOICE_FAIL = "fail"
+# 播报片段名（对应 voice/ 下的 wav；在 demo_cheese.VOICE_FILES 里逐支 load）
+#
+# 2026-11-08 第二版：原来只有 pass/fail 两支，台词是
+#   "检测完成，表面未发现明显异常。" / "检测完成，发现疑似异常，请师傅复核。"
+# 问题：**完全不提正反面** —— 一场巡检要看 6 个面，观众听不出这句话说的是正面还是反面。
+# 演示流程文档（demo_flow.py 里现场验证过的 TTS 文案）要求的是：
+#   奶酪状态，正面正常。/ 奶酪状态，正面不正常。
+#   奶酪状态，反面正常。/ 奶酪状态，反面不正常。
+# 所以改成按"面 × 结论"四选一，四支都是同一把云端音色预生成的（见
+# _tmp/gen_face_clips.py），已经用 DashScope ASR 回读逐支核对过。
+VOICE_FRONT_OK = "front_ok"       # 奶酪状态，正面正常。
+VOICE_FRONT_BAD = "front_bad"     # 奶酪状态，正面不正常。
+VOICE_BACK_OK = "back_ok"         # 奶酪状态，反面正常。
+VOICE_BACK_BAD = "back_bad"       # 奶酪状态，反面不正常。
+
+# 旧名保留：第三方脚本/旧日志里还有引用，指向"正面"那两支最接近的
+VOICE_PASS = VOICE_FRONT_OK
+VOICE_FAIL = VOICE_FRONT_BAD
 
 _DEFAULT_ROOT = Path(__file__).resolve().parents[2]   # 仓库根（scripts 的上一层）
 
@@ -167,28 +183,43 @@ class CheeseInspector:
     # ------------------------------------------------------------------
     # 播报
     # ------------------------------------------------------------------
-    def announce(self, res):
-        """判完立刻播报这一次的结果：没霉 -> PASS，有霉 -> FAIL。
+    @staticmethod
+    def _is_back(res):
+        """这一面是不是"反面"。tag 形如 ``第一块 反面（已翻腕）``。"""
+        text = "{} {}".format(res.get("tag") or "", res.get("slug") or "")
+        return "反面" in text
 
-        2026-11-08 修正（用户现场发现播反了）：两支音频的实际台词是
-            result_pass.wav = "检测完成，表面未发现明显异常。"   <- 没霉
-            result_fail.wav = "检测完成，发现疑似异常，请师傅复核。" <- 有霉
-        之前写成"有霉 -> PASS"，语义正好颠倒。现已按音频原意对齐：
-        **mold=True 播 fail，mold=False 播 pass**。
+    def announce(self, res):
+        """判完立刻播报这一次的结果，**按面分别**出声。
+
+        台词（四支预生成音频，ASR 逐支核对过）：
+            front_ok.wav  = "奶酪状态，正面正常。"       <- 正面 + 没霉
+            front_bad.wav = "奶酪状态，正面不正常。"     <- 正面 + 有霉
+            back_ok.wav   = "奶酪状态，反面正常。"       <- 反面 + 没霉
+            back_bad.wav  = "奶酪状态，反面不正常。"     <- 反面 + 有霉
+
+        2026-11-08 之前只有 pass/fail 两支、且不分面（台词里没有"正面/反面"），
+        6 个面连续播报时听不出说的是哪一面，现场反馈后改成按面四选一。
+
+        结论口径：``mold=False`` -> 正常、``mold=True`` -> 不正常。
+        取不到图 / 没分出奶酪时没有结论，按"没看到 ≠ 干净"播**不正常**，
+        同时打一行警告，免得把"没对准"悄悄当成合格。
 
         非阻塞（``VoiceBox.say`` 入队即返回），手臂可以同时继续走动作。
-        取不到图/没分出奶酪时没有结论，按"没看到 ≠ 干净"播 fail，
-        同时打一行警告，免得把"没对准"悄悄当成合格。
         """
         if self._voice is None:
             return False
+        back = self._is_back(res)
         if res.get("reason") == "ok":
-            name = VOICE_FAIL if res.get("mold") else VOICE_PASS
+            healthy = not res.get("mold")
         else:
-            # 没取到图 / 没分出奶酪：没有结论，不能当合格播 pass。
-            name = VOICE_FAIL
+            healthy = False                     # 没结论，不能当正常播
             if self._verbose and res.get("reason") == "no_cheese":
-                print("     ⚠ 本面没分出奶酪，仍按 FAIL 播报（没看到 ≠ 干净）")
+                print("     ⚠ 本面没分出奶酪，仍按「不正常」播报（没看到 ≠ 干净）")
+        if back:
+            name = VOICE_BACK_OK if healthy else VOICE_BACK_BAD
+        else:
+            name = VOICE_FRONT_OK if healthy else VOICE_FRONT_BAD
         return self._voice.say(name)
 
     def has_mold(self):

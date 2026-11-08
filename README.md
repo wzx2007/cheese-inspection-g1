@@ -85,9 +85,14 @@ scripts/
     ├── memory.py           对话与检测记录
     ├── play_clip.py        VoiceBox（队列 + 后台线程，16 kHz/单声道 PCM 流式写入）
     ├── model_kws/          训练好的唤醒词模型（onnx + xingbao.tflite）
-    ├── result_pass.wav     这一面有霉 -> PASS
-    ├── result_fail.wav     这一面没霉 -> FAIL
-    ├── goodbye.wav         跑完道别
+    ├── result_pass.wav     停用：旧的"未发现异常"（不分正反面）
+    ├── result_fail.wav     停用：旧的"发现疑似异常"（不分正反面）
+    ├── front_ok.wav        正面正常
+    ├── front_bad.wav       正面不正常
+    ├── back_ok.wav         反面正常
+    ├── back_bad.wav        反面不正常
+    ├── check_done.wav      三轮跑完："检查完成"
+    ├── goodbye.wav         然后道别
     ├── laugh.wav           彩蛋：奶龙大笑（19.8 s）
     └── *_16k_mono.pcm      预转 PCM，省掉机器人上的 ffmpeg
 ```
@@ -212,7 +217,7 @@ gripper_open -> arm_reset -> height_ready -> [look_front]
      00   ✅    4     1.6784%   (712, 899)
      ...
      结论：有霉菌（3/3 帧命中，最大 1.6784%）
-  音量设为 100
+  ♪ 播报 front_bad（2.32 s）        ← 判完立刻播"奶酪状态，正面不正常"
 ```
 
 全部结束后汇总：
@@ -246,31 +251,41 @@ gripper_open -> arm_reset -> height_ready -> [look_front]
 
 ## 5. 声音
 
-2026-11-08 换成三支现场录音，旧的 `laugh.mp3`（19.8 s）和 `拉玛刹.mp3` 都已删除。
+识别结果的播报按 **「哪一面 × 正常/不正常」四选一**（2026-11-08 改，对齐演示流程文档里
+`demo_flow.py` 的台词）。此前只有 pass/fail 两支、台词是"检测完成，表面未发现明显异常"，
+根本不提正反面 —— 一场看 6 个面，观众听不出说的是哪一面，现场反馈后换掉。
 
-| 文件 | 什么时候播 | 时长 | 原始格式 |
+| 文件 | 什么时候播 | 台词（ASR 回读核对） | 时长 |
 | --- | --- | --- | --- |
-| `result_pass.wav` | 这一面**有**霉（PASS） | 4.44 s | 32 kHz / 16 bit / 单声道 |
-| `result_fail.wav` | 这一面**没**霉（FAIL） | 5.14 s | 同上 |
-| `goodbye.wav` | 三次跑完、收身之后 | 3.40 s | 同上 |
-| `laugh.wav` | 彩蛋：随口让它笑一下 | 19.78 s | 16 kHz / 单声道（奶龙大笑） |
+| `front_ok.wav` | 正面 + 没霉 | 奶酪状态，正面正常。 | 2.24 s |
+| `front_bad.wav` | 正面 + 有霉 | 奶酪状态，正面不正常。 | 2.32 s |
+| `back_ok.wav` | 反面 + 没霉 | 奶酪状态，反面正常。 | 2.24 s |
+| `back_bad.wav` | 反面 + 有霉 | 奶酪状态，反面不正常。 | 2.24 s |
+| `check_done.wav` | 三轮跑完 | 检查完成。 | 1.04 s |
+| `goodbye.wav` | 紧接着道别 | 今天的演示到这里，谢谢大家。 | 3.40 s |
+| `laugh.wav` | 彩蛋：随口让它笑一下 | 奶龙大笑（不是人声台词） | 19.78 s |
 
-- `laugh.wav` 走**规则层**（`voice/intent.py: is_laugh()`），"停"字优先，命中就走，
-  不等大模型往返——所以"笑一个""笑一下""给我笑"这类说法是 0 延迟的。两条音频入口
-  （`--talk-only` 的 `_connect_audio` 和运动模式的 `demo_cheese.connect`）都会 `_preload_laugh()`，
-  启动日志里能看到两行 `语音 laugh <- laugh.wav（19.78 s）`。
-
-- **每次识别完立刻播报当时的结果**，不是攒到最后一次播。播报用 `VoiceBox`
-  （`voice/play_clip.py`）：队列 + 后台线程，`say()` 入队即返回，说话的同时手臂
-  继续走动作。两次查看之间隔十几秒动作，队列不会堆积。
-- 收尾的 goodbye 用 `say("goodbye", wait=True)` **阻塞等到播完**，否则随后的
-  `request_shutdown()` 会把尾音截掉。
-- 三支都是 32 kHz，而 SDK 的 `write_audio_stream_output` 只吃
-  **16 kHz / 16 bit / 单声道 PCM**，所以必须先转：`ensure_pcm()` 用 ffmpeg
-  （没有则退 miniaudio）转成 `<名字>_16k_mono.pcm` 并缓存。已预转好一起部署。
+- **口径：正常 = 没霉，不正常 = 有霉。** 没分出奶酪/没取到图时**没有结论**，
+  按"没看到 ≠ 干净"播**不正常**，同时终端打一行警告（`inspector.announce`）。
+- 四支是同一把云端音色（`cosyvoice-v3-flash` / `longxiaochun_v3`）**离线预生成**的，
+  不在现场跑 TTS —— 现场合成要 1~2 s 且依赖网络，反而拖慢动作。生成脚本的台词就是
+  `demo_flow.py` 里 `speak("奶酪状态，" + ...)` 那一行，改词要两边一起改。
+- 生完立刻用 DashScope ASR 回读、并且**打乱文件名再读一遍**核对（防止张冠李戴），
+  四支 PCM 的 md5 也各不相同 —— 这套核对别省。
+- 旧的 `result_pass.wav` / `result_fail.wav` 已停用（文件保留在 `voice/` 里，方便回退）。
+- 播报用 `VoiceBox`（`voice/play_clip.py`）：队列 + 后台线程，`say()` 入队即返回，
+  说话的同时手臂继续走动作。两次查看之间隔十几秒动作，队列不会堆积。
+- 收尾两句都进同一条 FIFO：`say("check_done")` 再 `say("goodbye", wait=True)` ——
+  只有最后一句阻塞，等它播完才返回，否则随后的 `request_shutdown()` 会把尾音截掉。
+- 四支结果音是 24 kHz（TTS 输出），`goodbye` 是 32 kHz（早先录的）。SDK 的
+  `write_audio_stream_output` 只吃 **16 kHz / 16 bit / 单声道 PCM**，所以必须先转：
+  `ensure_pcm()` 用 ffmpeg（没有则退 miniaudio）转成 `<名字>_16k_mono.pcm` 并缓存。
 - 音量 `set_volume(100)`，`VoiceBox` 初始化时设一遍（`vision/config.py: VOICE_VOLUME`）。
 - 想只判不出声：`--no-voice`。想单独试听某支：
-  `python3 voice/play_clip.py --file voice/result_pass.wav --volume 100`。
+  `python3 voice/play_clip.py --file voice/front_ok.wav --volume 100`。
+- `laugh.wav` 走**规则层**（`voice/intent.py: is_laugh()`），"停"字优先，命中就走，
+  不等大模型往返——所以"笑一个""笑一下""给我笑"这类说法是 0 延迟的。两条音频入口
+  （`--talk-only` 的 `_connect_audio` 和运动模式的 `demo_cheese.connect`）都会 `_preload_laugh()`。
 
 ---
 
@@ -386,6 +401,13 @@ print(len(h.upload_tree(r'CheeseBot/scripts','/home/galbot/scripts'))); h.close(
 
 ## 9. 变更记录
 
+- **2026-11-08** 结果播报改成**按面四选一**：原来的 `result_pass/fail` 两支台词是
+  "检测完成，表面未发现明显异常"，不提正反面，6 个面连续播报时听不出说的哪一面。
+  换成 `front_ok/front_bad/back_ok/back_bad` 四支（台词对齐 `demo_flow.py`：
+  "奶酪状态，正面正常/不正常""奶酪状态，反面正常/不正常"），云端 TTS 离线预生成 + ASR
+  打乱文件名回读核对；收尾补一句 `check_done.wav`（"检查完成"）再接道别。
+  `inspector.announce` 改为 `_is_back()` + `healthy` 二维选片，`xingbao_sim` 同步。
+  新增回归 `_tmp/test_face_clips.py`（4 组合 + 2 种"没看清" + 文件/加载表）。
 - **2026-11-08** 导航照 `demo_flow.py` 重写"谁说了算"：`ChassisNavigator` 不再是"盯着状态
   轮询的执行器"，而是"派一次活就等的客户端"。① 非 `RUNNING` 要连续 6 s 且车确实没动才认输
   （SDK 会丢任务结果凭空报 `FAILED`）；② 候选点改惰性产出（终点直连 → 预停位由近到远 →

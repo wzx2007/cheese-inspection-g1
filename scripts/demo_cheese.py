@@ -56,11 +56,12 @@
   霉菌的 Black-Hat 深度从 192 掉到 65，直接判不出来。
 
 视觉（scripts/vision）：两次"查看"各连拍 6 帧判霉菌，**每判完一面就立刻播报
-这一面的结果** —— 有霉放 ``result_pass.wav``，没霉放 ``result_fail.wav``；
+这一面的结果** —— 按"哪一面 × 正常/不正常"四选一：
+正面正常 / 正面不正常 / 反面正常 / 反面不正常（``front_ok.wav`` 等四支）；
 三次全跑完（含收身）再放 ``goodbye.wav``。判据见 vision/config.py。
 
 播报是非阻塞的（``voice/play_clip.py`` 的 VoiceBox 用队列 + 后台线程），
-播报的同时手臂继续走动作，不会把演示拖长。三支音频都是 32 kHz，
+播报的同时手臂继续走动作，不会把演示拖长。音频是 24 kHz（旧两支 32 kHz），
 SDK 要 16 kHz / 16 bit / 单声道，VoiceBox 会先转 PCM 并缓存。
 
 双手一起动：左臂关节是右臂逐项取负。躯干保持直立，只升降和转腕。
@@ -121,17 +122,27 @@ _HERE = Path(__file__).resolve().parent
 
 # 视觉与声音
 USE_VISION = True
-# 2026-11-08：换成三支现场录的语音。没霉（合格）= PASS，有霉 = FAIL，跑完道别。
-# 台词已用 DashScope ASR 核对（2026-11-08）：
-#   result_pass.wav = "检测完成，表面未发现明显异常。"
-#   result_fail.wav = "检测完成，发现疑似异常，请师傅复核。"
-# 三支都是 32 kHz，SDK 只吃 16 kHz/16bit/单声道，VoiceBox 会转 PCM 并缓存。
+# 2026-11-08 第二版：播报按"哪一面 × 正常/不正常"四选一（对齐演示流程文档里
+# demo_flow 的台词）。旧的 pass/fail 两支台词是"检测完成，表面未发现明显异常"，
+# 根本不提正反面，6 个面连续播报时听不出说的哪一面，已停用（文件留在 voice/ 里）。
+# 台词已用 DashScope ASR 逐支核对（2026-11-08）：
+#   front_ok.wav  = "奶酪状态，正面正常。"
+#   front_bad.wav = "奶酪状态，正面不正常。"
+#   back_ok.wav   = "奶酪状态，反面正常。"
+#   back_bad.wav  = "奶酪状态，反面不正常。"
+# 四支都是同一把云端音色（cosyvoice longxiaochun_v3）预生成的，24 kHz；
+# SDK 只吃 16 kHz/16bit/单声道，VoiceBox 会转 PCM 并缓存。
+# check_done.wav = "检查完成。"（流程文档第 12 步，demo_flow 也是这一句）
 VOICE_FILES = (
-    ("pass", "result_pass.wav"),     # 这一面没霉（合格）
-    ("fail", "result_fail.wav"),     # 这一面有霉
-    ("goodbye", "goodbye.wav"),      # 三次跑完
+    ("front_ok", "front_ok.wav"),      # 正面 + 没霉
+    ("front_bad", "front_bad.wav"),    # 正面 + 有霉
+    ("back_ok", "back_ok.wav"),        # 反面 + 没霉
+    ("back_bad", "back_bad.wav"),      # 反面 + 有霉
+    ("check_done", "check_done.wav"),  # 三轮跑完："检查完成。"（对齐流程文档）
+    ("goodbye", "goodbye.wav"),        # 然后道别
 )
 VOICE_GOODBYE = "goodbye"
+VOICE_CHECK_DONE = "check_done"
 
 # 三次跑完之后按"有几个面有霉"分流到不同终点（2026-11-08 新增）。
 # 0 -> 不动 / 1 -> 终点 A / 2 -> 终点 B。坐标在 mission/route.py 开头，
@@ -725,12 +736,18 @@ def route_after_loops(vision, router, count_mode=ROUTE_COUNT_MODE):
 
 
 def farewell(voice):
-    """三次跑完之后道别。等它播完，否则后面的 request_shutdown 会截掉尾音。"""
+    """三次跑完之后收尾：先"检查完成"，再道别。
+
+    "检查完成"是流程文档第 12 步要的那句（demo_flow 用 TTS 现场合成）。
+    两句都进同一条 FIFO 队列，只有最后一句 wait=True —— 等它播完再返回，
+    否则后面的 request_shutdown 会把尾音截掉；入队顺序保证"检查完成"在前。
+    """
     if voice is None:
         return
     try:
+        voice.say(VOICE_CHECK_DONE)
         if voice.say(VOICE_GOODBYE, wait=True):
-            print("  道别完毕")
+            print("  收尾播报完毕（检查完成 + 道别）")
     except Exception as exc:  # noqa: BLE001
         print("  道别播报异常：{}".format(exc))
 

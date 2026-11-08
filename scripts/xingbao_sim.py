@@ -177,10 +177,14 @@ class FakeVision(object):
                    max_ratio=0.0125 if mold else 0.0,
                    frames=[], time=time.strftime("%H:%M:%S"))
         self.results.append(res)
-        # 真检查器就是在这里播音频的，模拟也照做 —— 顺带验证喇叭通路
+        # 真检查器就是在这里播音频的，模拟也照做 —— 顺带验证喇叭通路。
+        # 片名与 vision/inspector.py 的 VOICE_* 一致：按"面 × 结论"四选一
         if self._voice is not None:
+            back = "反面" in str(tag)
+            name = ("back_bad" if back else "front_bad") if mold else \
+                   ("back_ok" if back else "front_ok")
             try:
-                self._voice.say("fail" if mold else "pass")
+                self._voice.say(name)
             except Exception as exc:            # noqa: BLE001
                 print("  （播报异常：{}）".format(exc))
         return res

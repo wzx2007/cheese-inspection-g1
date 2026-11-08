@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""让 Galbot G1 播放语音片段（``goodbye.wav`` / ``result_pass.wav`` / ``result_fail.wav``）。
+"""让 Galbot G1 播放语音片段（``front_ok/bad.wav``、``back_ok/bad.wav``、``goodbye.wav``）。
 
 SDK 的音频输出接口 ``write_audio_stream_output`` 只接受
 **16000 Hz / 16 bit / 单声道 PCM**，不能直接播 WAV/MP3。本模块先用 ffmpeg
 （没有则退 miniaudio）转成 PCM 并缓存，再每 2560 字节写一次、间隔 50 ms。
 
-现场用的三支音频都是 **32 kHz**，所以这一层转换是必需的，不是可选项。
+现场音频有 24 kHz（TTS 预生成的四支结果音）和 32 kHz（早先录的 goodbye），
+都不是 16 kHz，所以这一层转换是必需的，不是可选项。
 
 两种用法
 --------
 ``VoiceBox``
-    给 ``demo_cheese`` 用：预载全部片段，``say("pass")`` 入队，后台线程按
+    给 ``demo_cheese`` 用：预载全部片段，``say("front_ok")`` 入队，后台线程按
     FIFO 顺序播，不挡动作。识别完立刻播报结果靠它。
 ``play_pcm`` / 命令行
     独立播放/转换，用来在部署前把 PCM 转好，或现场单独试听::
 
-        python3 play_clip.py --file result_pass.wav --volume 50
+        python3 play_clip.py --file front_ok.wav --volume 100
         python3 play_clip.py --convert-only --file goodbye.wav
 
 安全说明：只初始化 SDK、设音量、写音频流，不使能关节、不控底盘、不做任何运动。
@@ -207,8 +208,8 @@ class VoiceBox:
     现场要求是"每次识别完立刻播报当时的结果"，所以 ``say`` 必须是非阻塞的 ——
     播报的同时手臂还要继续走动作。用一个队列 + 单工作线程实现：
 
-    * ``say("pass")`` 立即返回，片段排队；
-    * 一次查看的语音通常 4~5 s，而两次查看之间隔十几秒动作，队列不会堆积；
+    * ``say("front_ok")`` 立即返回，片段排队；
+    * 一次查看的语音通常 2~3 s，而两次查看之间隔十几秒动作，队列不会堆积；
     * ``say(..., wait=True)`` 阻塞到该片段播完（收尾的 goodbye 用它）。
 
     不调用 ``init``/``destroy``，机器人由调用方管理。
