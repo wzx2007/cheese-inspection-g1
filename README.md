@@ -330,25 +330,37 @@ print(len(h.upload_tree(r'CheeseBot/scripts','/home/galbot/scripts'))); h.close(
 
 命令行：`--debug` `--no-vision` `--no-voice` `--vision-frames N` `--volume 0-100` `--runs-dir` `--backoff M` `--max-lastmile M` `--no-route` `--count-mode` `--tool`。
 
-导航的其余旋钮（`skip_global_m` / `arrive_tol_m` / `status_grace_s` / `pose_jump_m` /
-`relocalize_retries` / `navigate_budget_s`）都在 `ChassisNavigator.__init__` 的默认值里，
-改之前先读 7.1——它们每一条都是为了**不要**和规划器抢方向盘。
+导航的其余旋钮（`direct_first` / `stall_timeout_s` / `skip_global_m` / `arrive_tol_m` /
+`status_grace_s` / `pose_jump_m` / `relocalize_retries` / `navigate_budget_s`）都在
+`ChassisNavigator.__init__` 的默认值里，改之前先读 7.1——它们每一条都是为了**不要**和
+规划器抢方向盘。
 
-## 7.1 导航：全局规划为主，直线补位只兜底
+## 7.1 导航：直接把终点交给规划器
 
-终点 `table` 就是**建图时机器人站的位置**，机器人自身的点被写进地图，所以终点格本身是"不可达"
-（实测 `check_path_reachability(终点)` 返回 False，而离终点 0.5 m 以外的点全部 True）。
-规划器的 `point_safe_margin` 又是 0.45 m，于是候选点按这个顺序惰性产出：
+终点 `table` 就是**建图时机器人站的位置**，机器人自身的点被写进地图，所以终点格本身常被
+预检判成"不可达"（实测 `check_path_reachability(终点)` 返回 False）。而且预检在桌前**一律
+不准**：车贴着桌子，自己的位姿就在规划器 0.45 m 的 `point_safe_margin` 里，从这个位姿出发
+它对**任何**终点都返回 False。
 
-1. **终点直连**（可达才进队列）——大多数时候这一档就成，一次派活直达；
-2. **预停位由近到远**（沿终点朝向往回退 0.8 → 2.2 m，最多 6 档）——第一档被
-   `CLOSE_TO_OBSTACLE`/`OCCUPIED` 顶回来时才退下一档；
-3. 兜底再试一次终点。
+所以 2026-11-08 起，候选顺序是"终点永远第一档、预检只当提示"：
 
-第一档成功就不再查后续预检。到了预停位之后，如果**全局导航已判定到达、但真位姿与终点还差
-一点点**（`pos_err ≤ arrive_tol_m 0.22 m`），才用 `move_straight_to` 按 odom 小步
-（0.2 m/步）把最后那截补进去。超过 `max_lastmile_m`（2.5 m）**不硬补**——说明全局那段
-根本没走成，直接交回全局自愈重规划，而不是靠里程计一路盲走。
+1. **终点直连**——`navigate_to_goal(终点)` 派一次活就等到达，和 `demo_flow.py` 一样。
+   终点**连预检都不做**：既然结论一律不信、一律照试，提前查它只是白花 100 ms IPC；
+2. **预停位由近到远**（沿终点朝向往回退 0.8 → 1.2 m，最多 6 档）——只有直连真被
+   `COLLISION`/`CLOSE_TO_OBSTACLE` 顶回来才往下走，预检在这里只用来排序；
+3. 兜底再试一次终点（走到这一步说明规划器中间抖过：临时障碍或位姿刚被拉回）。
+
+**为什么改成这样**：原来把预检当闸门，于是每趟都先绕预停位；而预停位在桌前必然
+`COLLISION` 或原地卡死 20 s，最后"直接导航到终点"才成——三圈演示每趟白烧 30~50 s 在一条
+必败的绕路上，真正成功的那一步被排在队尾。现场日志里那句"第一段重试 1/1"是同一件事的副
+作用：对同一个点重派，规划器拿同一张图、同一个起点，结论必然一样。现在这层重试整个删了
+（`stage1_retries` 形参只为兼容老调用方保留，值不再被读取），卡死判定也从 20 s 压到 8 s
+（现场卡住时位姿是 0.000 变化，2 s 一个采样，8 s 足够确诊且不再空站）。
+
+到了终点之后，如果**全局导航已判定到达、但真位姿与终点还差一点点**（`pos_err ≤
+arrive_tol_m 0.22 m`），才用 `move_straight_to` 按 odom 小步（0.2 m/步）把最后那截补进去。
+超过 `max_lastmile_m`（2.5 m）**不硬补**——说明全局那段根本没走成，直接交回全局自愈重规划，
+而不是靠里程计一路盲走。
 
 ### 谁说了算：别抢规划器的方向盘
 
@@ -368,12 +380,15 @@ print(len(h.upload_tree(r'CheeseBot/scripts','/home/galbot/scripts'))); h.close(
 
 | 构造参数 | 默认 | 含义 |
 | --- | --- | --- |
+| `direct_first` | True | 终点是否排候选第一档（关掉才回到"预停位优先"的旧顺序） |
 | `skip_global_m` | 0.5 | 离终点小于这个距离就不再走全局导航 |
 | `arrive_tol_m` | 0.22 | 判定"到了"的位置容差（自愈阈值同源） |
 | `status_grace_s` | 6.0 | 非 RUNNING 状态要持续这么久才认输 |
+| `stall_timeout_s` | 8.0 | 车 0.10 m / 5° 都没动满这么久就判"卡住"（原 20 s） |
 | `pose_jump_m` / `pose_jump_deg` | 1.5 / 60 | 位姿突变的判定门槛 |
 | `relocalize_retries` | 2 | 定位跳变后重规划同一目标的最多次数 |
-| `navigate_budget_s` | 100 | 单次派活的时间预算，超时才放弃 |
+| `navigate_budget_s` | 100 | 一趟导航换点的总预算（不是单次派活），超时才放弃 |
+| `stage1_retries` | — | **已废弃**，形参保留只为兼容老调用方，值不再被读取 |
 
 ---
 
@@ -391,7 +406,8 @@ print(len(h.upload_tree(r'CheeseBot/scripts','/home/galbot/scripts'))); h.close(
 | 播报顺序乱 | 队列堆积（两次查看间隔太短） | 正常间隔十几秒，不会堆；若改快了就在 `say` 后加 `wait_idle()` |
 | `no feasible leg pose for ee_z=... m, pitch=0.00 deg` | 开机时头高超出可解区（实测停在 1.5627 m，比 `HEIGHT_MAX=1.54` 高 2 cm），这个高度下回正俯仰无解 | 已内置兜底：`level_leg()` 失败就先落到 1.37 m 再回正；日志会先打一行"当前头高 …" |
 | 导航报"到位误差超限，正在自愈" | 全局那段成了，但真位姿离终点还差一点 | 看日志里的 `位置误差 / 朝向误差`；重录 `nav_goals/table.json`。自愈会用新坐标再重规划一次，最多两次 |
-| 第一段 `CLOSE_TO_OBSTACLE` / `OCCUPIED`，接着"规划器嫌太近，换更远的预停位" | 终点在障碍膨胀区（建图起点就贴着奶酪桌），0.8 m 的预停位又在区边缘 | 正常现象，会自动退下一档（最多 6 档，0.8→2.2 m）；全被拒才需要把车先开到离桌 2 m 内，或 `--backoff 1.5` |
+| 导航日志每趟第一句就是"直接导航到终点（一次派活，和 demo_flow 一样）" | 这是**新顺序**：终点永远第一档，预检不再当闸门 | 不用管。看到它之后直接到位就是正常；只有在它后面才可能出现预停位 |
+| "直接导航到终点"被拒（`COLLISION` / `CLOSE_TO_OBSTACLE`），接着"预停位后退 0.8 m" | 终点在障碍膨胀区（建图起点就贴着奶酪桌），直连确实被规划器顶回来了 | 正常兜底：会自动退预停位（最多 6 档，0.8→1.2 m），再不行兜底重试终点；全被拒才需要把车往外挪半米，或 `--backoff 1.5` |
 | 日志里状态突然 `FAILED`，但车还在走 | SDK 丢了任务结果（`has unknow task result`），状态是假的 | 不用管：现在要连续 6 s 不走才认输，最终看真位姿 |
 | "定位跳变 6.87 m，正在重规划" | 重定位/里程计跳变，剩余距离会瞬间变得离谱 | 不用管：会丢弃那段 odom、用新坐标重规划同一目标（最多 2 次），期间播报"定位飘了一下" |
 | 车原地来回小幅摆动不收敛 | 预停位正好压在膨胀区边缘，规划器反复解不出可行腿 | 手动把车挪开 0.5 m 重新发起；或 `--backoff` 给一个更远的起点 |
@@ -401,6 +417,13 @@ print(len(h.upload_tree(r'CheeseBot/scripts','/home/galbot/scripts'))); h.close(
 
 ## 9. 变更记录
 
+- **2026-11-08** 导航"别再绕那 20 秒"：现场日志显示每趟都是先绕预停位、卡 20 s 失败、
+  重试 1/1、最后"直接导航到终点"才成。根因是 `check_path_reachability` 在车自己处于
+  膨胀区时对**所有**终点返 False，旧逻辑把它当闸门。现在 ① 终点永远候选第一档、连预检
+  都不做（`direct_first=True`）；② 删掉 `stage1_retries`（"第一段重试 1/1"），只留
+  "卡住才原地重派一次"；③ `stall_timeout_s` 20 s → 8 s；④ 预停位扫描收窄到 0.8/1.0/1.2 m
+  且默认不做横移。回归 `test_nav_fast.py` 8 组、`test_nav_field_jump.py` 9 组、
+  `test_nav_second_run.py` 全过。
 - **2026-11-08** 结果播报改成**按面四选一**：原来的 `result_pass/fail` 两支台词是
   "检测完成，表面未发现明显异常"，不提正反面，6 个面连续播报时听不出说的哪一面。
   换成 `front_ok/front_bad/back_ok/back_bad` 四支（台词对齐 `demo_flow.py`：

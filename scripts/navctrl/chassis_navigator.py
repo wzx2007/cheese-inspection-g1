@@ -1,11 +1,12 @@
 """Two-stage chassis navigation for the cheese demo.
 
-The table goal sits in a tight spot, so a single global plan often stops short
-of it.  The move is therefore split:
+The table goal sits in a tight spot, so one global plan sometimes stops short of
+it.  The move is therefore split:
 
-1. ``navigate_to_goal`` to a pre-stop that the planner accepts (or straight to
-   the goal when the goal itself is reachable).
-2. Short ``move_straight_to`` steps in the odom frame for the last stretch.
+1. ``navigate_to_goal`` **straight at the goal** (this is the only thing we do
+   in the common case);
+2. if the planner refuses the goal, fall back to a pre-stop + short
+   ``move_straight_to`` steps in the odom frame for the last stretch.
 
 Design rule learned the hard way (2026-11-08): **let the planner do the
 driving.**  ``demo_flow.py`` navigated well because it only ever did
@@ -20,7 +21,18 @@ three ways, and each one turned a recoverable hiccup into a failed demo:
 - the last-mile odom补位 raised ``NavigationError`` when it could not help,
   killing the whole task even though it is only a finishing touch.
 
-So: wait patiently, judge by pose, and never let the fallback win the argument.
+Second lesson (same day, from the field log): **stop walking backwards first.**
+``check_path_reachability`` returns False for *every* goal whenever the robot
+itself is standing inside the 0.45 m inflation zone — which is exactly what
+happens at the table.  We used to treat that as "the goal is unreachable", go
+via a pre-stop instead, watch the pre-stop fail with COLLISION/stall, and only
+then try the goal directly... which worked.  So three laps burned 30-50 s each
+on a detour that always lost, and the winning move was the one at the end.
+Now the goal itself is always candidate #1, and the pre-check is only a hint
+used to order the fallbacks.
+
+So: wait patiently, judge by pose, try the goal first, and never let the
+fallback win the argument.
 
 The class does not own SDK startup or shutdown.  Pass an initialised
 ``GalbotRobot`` and ``GalbotNavigation``.
@@ -89,11 +101,11 @@ class ChassisNavigator:
         goal_dir,
         *,
         timeout_s: float = 150.0,
-        stage1_retries: int = 1,
+        stage1_retries: int = 0,
         arrival_threshold: Sequence[float] = (0.2, 0.2, 0.2),
         backoff_m: float = 0.0,
-        backoff_scan: Sequence[float] = (0.8, 1.0, 1.2, 1.5, 1.8, 2.2),
-        lateral_scan: Sequence[float] = (0.4, -0.4),
+        backoff_scan: Sequence[float] = (0.8, 1.0, 1.2),
+        lateral_scan: Sequence[float] = (),
         max_lastmile_m: float = 2.5,
         skip_global_m: float = 0.5,
         lastmile_step_m: float = 0.2,
@@ -107,7 +119,7 @@ class ChassisNavigator:
         pose_wait_s: float = 3.0,
         yaw_overshoot_deg: float = 25.0,
         straight_timeout_s: float = 8.0,
-        stall_timeout_s: float = 20.0,
+        stall_timeout_s: float = 8.0,
         max_distance_m: float = 15.0,
         self_heal: bool = True,
         pos_tol_m: float = 0.06,
@@ -124,6 +136,9 @@ class ChassisNavigator:
         self._nav = nav
         self._goal_dir = Path(goal_dir)
         self.timeout_s = float(timeout_s)
+        # 已废弃：对同一个点重派一次从来不会改变规划器的结论（同一张图、同一个
+        # 起点），现场日志里每次"重试 1/1"都是同样的 COLLISION。留着这个形参
+        # 只是不想让老调用方报错，值不再被读取 —— 见 _stage1 的说明。
         self.stage1_retries = int(stage1_retries)
         self.arrival_threshold = [float(value) for value in arrival_threshold]
         self.backoff_m = float(backoff_m)
@@ -142,6 +157,9 @@ class ChassisNavigator:
         self.pose_wait_s = float(pose_wait_s)
         self.yaw_overshoot_deg = float(yaw_overshoot_deg)
         self.straight_timeout_s = float(straight_timeout_s)
+        # 卡死判定时间（车 0.10 m / 5° 都没动算"卡住"）。2026-11-08 从 20 s 压到 8 s：
+        # 现场日志里卡住时位姿是 0.000 变化，2 s 一个采样，8 s 就足够确诊；
+        # 而 20 s 白等一轮，三圈加起来就是一分多钟干站着。
         self.stall_timeout_s = float(stall_timeout_s)
         self.max_distance_m = float(max_distance_m)
         self.self_heal = bool(self_heal)
@@ -367,30 +385,41 @@ class ChassisNavigator:
             t_wait = 0.0
             t_scan = time.time()
 
-            # 候选序列 = 「终点本身」+「预停位（由近到远）」，**惰性产出**：
-            # 第一档就成的话，后面的预检一次都不查（每次预检 100 ms）。
+            # 候选序列：**终点本身永远第一档**，预停位只是兜底。
             #
-            # 顺序为什么这么排（2026-11-08 第二次现场事故后改）：
-            # ``demo_flow.py`` 的导航一直是好的，而它只做一件事 ——
-            # ``nav.navigate_to(name)`` 一次派活，然后等 ``check_goal_arrival()``。
-            # 它不看中途 status、不拿"剩余距离"判死刑、不做自己的补位。
-            # 也就是说：**好的那版把决策权全交给规划器**。
+            # 为什么不再让预检决定顺序（2026-11-08 第三次现场事故后改）：
+            # 现场日志摆在那里 —— 桌子终点 `check_path_reachability` 常年返回
+            # False（车贴着桌子，自己的位姿就在 0.45 m 膨胀区里，于是从它出发
+            # 的任何路径都判不可达）。于是每趟都先绕预停位，而预停位那一档
+            # 必然 COLLISION / 卡住 20 s，最后"直接导航到终点"才成。
+            # 换句话说：三圈演示里每趟白烧 30~50 s 在一个必败的绕路上，
+            # 而真正成功的那一步被排在队尾。
             #
-            # 这一版就按这个来：先问一句终点本身能不能规划过去，
-            # 能就直接派活走人（大多数情况一趟搞定）；不能（桌子前那种
-            # 0.45 m 净空）才退到预停位。最后的兜底才是 odom 补位。
-            goal_direct = self.direct_first and self._reachable(goal, current)
+            # ``demo_flow.py`` 那版压根没有预检、没有预停位，直接
+            # ``navigate_to(name)``，一直是好的。所以就照它：先直连。
+            # 预检结果降级成"提示"：只用来给万一直连失败之后的预停位排序，
+            # 不再当"要不要先试终点"的闸门。
+            #
+            # 终点本身**连预检都不做**（2026-11-08 再改一轮）：既然预检的结论
+            # 我们一律不信、一律照试，那提前查它一次就只是白花 100 ms IPC；
+            # 真正想知道"可不可达"，让规划器在派活时直接回答。
 
             def _candidates():
-                if goal_direct:
-                    yield goal, 0.0, 0.0, True
-                for pre, along, lateral, reachable in self._iter_prestop(
-                        goal, goal_yaw, current):
-                    yield pre, along, lateral, reachable
-                if not goal_direct:
-                    # 预检不可信（车自己站在膨胀区里时它对任何终点都说 False）。
-                    # 所以把「终点本身」挂到队尾再试一次，而不是永远不试。
-                    yield goal, 0.0, 0.0, False
+                # 终点的 reachable 传 None = "没预检、不知道"，打印时据此省略提示
+                direct = (goal, 0.0, 0.0, None)
+                if self.direct_first:
+                    yield direct
+                    for pre, along, lateral, reachable in self._iter_prestop(
+                            goal, goal_yaw, current):
+                        yield pre, along, lateral, reachable
+                    # 预停位全没成：再给终点一次机会。走到这里说明规划器
+                    # 中间抖过（临时障碍/位姿刚被拉回），值得再派一次活。
+                    yield direct
+                else:
+                    for pre, along, lateral, reachable in self._iter_prestop(
+                            goal, goal_yaw, current):
+                        yield pre, along, lateral, reachable
+                    yield direct
 
             arrived = False
             status = "?"
@@ -405,7 +434,7 @@ class ChassisNavigator:
                         time.time() - t_scan, self.navigate_budget_s))
                     break
                 if along == 0.0 and lateral == 0.0:
-                    print("  直接导航到终点（和 demo_flow 一样，一次派活）")
+                    print("  直接导航到终点（一次派活，和 demo_flow 一样）")
                 else:
                     print("  预停位后退 {:.1f} m、横移 {:+.1f} m{}".format(
                         along, lateral,
@@ -415,8 +444,10 @@ class ChassisNavigator:
                     arrived, status = self._stage1(target)
                     t_stage += time.time() - t0
                     if arrived:
-                        # 这一档管用，记住它：下一趟同一个终点直接从这里开始
-                        self._preferred[self._goal_key(goal)] = (along, lateral)
+                        # 这一档管用，记住它：下一趟同一个终点先试预停位。
+                        # 直连成功时不必记（along=0 就是终点本身，记了也没意义）。
+                        if along or lateral:
+                            self._preferred[self._goal_key(goal)] = (along, lateral)
                         break
                     if status == "RELOCALIZED" and relocalized < self.relocalize_retries:
                         # 位姿被重定位了：同一个目标点重新派活即可。
@@ -445,7 +476,7 @@ class ChassisNavigator:
             timing["预检"] = max(0.0, (time.time() - t_scan) - t_stage - t_wait)
             print("  第一段试了 {} 个点，终点{}".format(
                 tried, "未到" if not arrived else "已到"))
-            if not arrived and not any_reachable and not goal_direct:
+            if not arrived and not any_reachable:
                 # 这是"规划不出来"最常见的一种：不是规划器算不出来，
                 # 是车自己站的这一格就已经在障碍膨胀区里（安全边距 0.45 m），
                 # 于是从它出发的任何一条路径都判不可达。日志里说清楚，
@@ -606,14 +637,26 @@ class ChassisNavigator:
             print("  到位判据未改：{}".format(exc))
 
     def _stage1(self, target) -> Tuple[bool, str]:
-        """跑第一段。返回 (是否到位, 结束状态名)。"""
+        """跑第一段。返回 (是否到位, 结束状态名)。
+
+        同一个目标点**最多派两次活**（2026-11-08 改）：
+        1. 正常派一次；
+        2. 只有"卡住"（``STALLED``，车确实没挪窝）才原地再派一次 ——
+           这相当于给 SDK 的规划器踢一脚，现场日志里两次都靠它救回来了；
+        3. 其它任何失败（``COLLISION``/``OCCUPIED``/``CLOSE_TO_OBSTACLE``）
+           立刻返回，交给上层换下一档候选。
+
+        为什么删掉原来那层 ``stage1_retries``（"第一段重试 1/1"）：
+        对同一个点重派，规划器拿着同一张图、同一个起点，结论当然一样。
+        现场日志里每一次"重试 1/1"都是同样的 COLLISION，白花 8 s 才往下走。
+        外层本来就有 5 档候选（终点直连 + 3 个预停位 + 再试终点），
+        把时间留给换点，比在同一格上磕两次划算。
+        """
         status = "?"
         stall_retried = False
         # 记下当前这一段的目标点：_wait_arrival 用它判断"是不是已经站进容差了"
         self._current_goal = [float(value) for value in target]
-        for attempt in range(self.stage1_retries + 1):
-            if attempt:
-                print("  第一段重试 {}/{}".format(attempt, self.stage1_retries))
+        while True:
             self._announce_move()
             self._forget_pose()           # 重新派活，位姿基线重取
             self._nav.navigate_to_goal(
@@ -628,19 +671,17 @@ class ChassisNavigator:
                 return True, "ARRIVED"
             self._stop()
             if status in TOO_CLOSE_STATUS:
-                return False, status      # 同一个点重试没用，让上层换更远的
+                return False, status      # 这个点规划器不收，让上层换更远的
             if status == "RELOCALIZED":
                 return False, status      # 交给上层用新坐标重规划
             if status == "STALLED" and not stall_retried:
-                # 卡住多半是前面站了人/临时挡了一下。原地重规划一次通常就好，
-                # 比干等 150 s 超时强太多（一次卡死就是两分半）。
+                # 卡住多半是前面站了人/临时挡了一下，或 SDK 内部规划卡了。
+                # 原地重规划一次通常就好，比干等 150 s 超时强太多。
                 stall_retried = True
-                print("  卡住了，重新规划一次（不换点）")
+                print("  卡住了，原地重新派一次活（不换点）")
                 self._settle(timeout_s=2.0, quiet_s=0.4)
                 continue
-            if elapsed > 30.0:
-                return False, status
-        return False, status
+            return False, status
 
     def _wait_arrival(self, label: str) -> Tuple[bool, float, str]:
         """等 SDK 把这一段走完。**只认"到了"，不认中途的瞬时状态**。
