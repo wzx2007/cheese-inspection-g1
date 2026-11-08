@@ -1,0 +1,10 @@
+# 代码跑在 Linux（机器人 Orin）上，统一用 LF，避免 CRLF 混进来
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.onnx binary
+*.tflite binary
+*.wav binary
+*.pcm binary
+*.mp4 binary

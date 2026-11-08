@@ -1,0 +1,122 @@
+{
+  "name": "set_both_arm_ready",
+  "description": "双手 Ready。间距 0.425 m，右手最末端关节转到规划器限位 1.538 rad。左臂逐项取负。",
+  "units": "rad",
+  "joint_order": {
+    "right_arm": [
+      "right_arm_joint1",
+      "right_arm_joint2",
+      "right_arm_joint3",
+      "right_arm_joint4",
+      "right_arm_joint5",
+      "right_arm_joint6",
+      "right_arm_joint7"
+    ],
+    "left_arm": [
+      "left_arm_joint1",
+      "left_arm_joint2",
+      "left_arm_joint3",
+      "left_arm_joint4",
+      "left_arm_joint5",
+      "left_arm_joint6",
+      "left_arm_joint7"
+    ]
+  },
+  "right_arm": [
+    -0.273794,
+    0.710605,
+    -0.101740,
+    1.263546,
+    2.578530,
+    0.135118,
+    1.538
+  ],
+  "left_arm": [
+    0.273794,
+    -0.710605,
+    0.101740,
+    -1.263546,
+    -2.578530,
+    -0.135118,
+    -1.538
+  ],
+  "symmetry": "left_arm = -right_arm；G1 左右臂关节轴镜像，官方 G1 示例同样使用相反数。不要直接把右臂数组复制给左臂。",
+  "tcp_reference": {
+    "frame": "right_gripper_tcp_link",
+    "reference_frame": "base_link",
+    "position_m": [
+      0.654584,
+      -0.425245,
+      0.349507
+    ],
+    "quaternion_xyzw": [
+      0.531353,
+      0.466527,
+      -0.466562,
+      0.531354
+    ],
+    "rotation_matrix": [
+      [
+        0.129345,
+        0.991600,
+        -0.000036
+      ],
+      [
+        -0.000038,
+        -0.000031,
+        -1.0
+      ],
+      [
+        -0.991600,
+        0.129345,
+        0.000034
+      ]
+    ],
+    "axes": {
+      "tcp_x_in_base": [
+        0.129345,
+        -0.000038,
+        -0.991600
+      ],
+      "tcp_y_in_base": [
+        0.991600,
+        -0.000031,
+        0.129345
+      ],
+      "tcp_z_in_base": [
+        -0.000036,
+        -1.0,
+        0.000034
+      ]
+    },
+    "note": "前六个关节保持间距 0.425 m 的 Ready，joint7 在规划器限位内侧 1.538 rad。左臂为右臂逐项取负。"
+  },
+  "source": {
+    "model": "refs/galbot_one_golf_description-main/mjcf/galbot_one_golf_fixed_base.xml",
+    "leg_joints_zero": true,
+    "reference_right_arm": [
+      -0.284,
+      0.829,
+      -0.215,
+      1.65,
+      2.42,
+      0.735,
+      0.366
+    ],
+    "reference_tcp_position_m": [
+      0.827303,
+      -0.285221,
+      0.60298
+    ],
+    "reference_orientation_error_deg": 10.205,
+    "solver": "mink 1.4.0 + daqp"
+  },
+  "verification": {
+    "right_position_error_mm": 0.000796,
+    "right_orientation_error_deg": 8e-05,
+    "left_mirror_position_error_mm": 0.0,
+    "left_mirror_orientation_error_deg": 0.0,
+    "min_joint_limit_margin_rad": 0.317228,
+    "self_collision_count": 0
+  }
+}

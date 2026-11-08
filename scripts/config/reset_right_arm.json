@@ -1,0 +1,158 @@
+{
+  "name": "reset_right_arm",
+  "description": "双手高举的初始状态。右臂关节来自原来的高举解，左臂逐项取负。",
+  "scope": "both_arms",
+  "units": "rad",
+  "joint_order": [
+    "right_arm_joint1",
+    "right_arm_joint2",
+    "right_arm_joint3",
+    "right_arm_joint4",
+    "right_arm_joint5",
+    "right_arm_joint6",
+    "right_arm_joint7"
+  ],
+  "right_arm": [
+    -0.521401,
+    -0.759294,
+    0.715714,
+    1.511323,
+    2.391454,
+    -0.703304,
+    0.115832
+  ],
+  "left_arm": [
+    0.521401,
+    0.759294,
+    -0.715714,
+    -1.511323,
+    -2.391454,
+    0.703304,
+    -0.115832
+  ],
+  "symmetry": "left_arm = -right_arm。不要把右臂数组原样复制给左臂。",
+  "tcp_reference": {
+    "frame": "right_gripper_tcp_link",
+    "reference_frame": "base_link",
+    "position_m": [
+      0.514535,
+      -0.430559,
+      1.173098
+    ],
+    "target_position_m": [
+      0.514535,
+      -0.430559,
+      1.173098
+    ],
+    "quaternion_xyzw": [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ],
+    "rotation_matrix": [
+      [
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0
+      ]
+    ],
+    "axes": {
+      "tcp_x_in_base": [
+        1.0,
+        0.0,
+        0.0
+      ],
+      "tcp_y_in_base": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "tcp_z_in_base": [
+        0.0,
+        0.0,
+        1.0
+      ]
+    },
+    "reference_position_m": [
+      0.499535,
+      -0.430559,
+      1.173098
+    ],
+    "position_offset_m": [
+      0.015,
+      0.0,
+      0.0
+    ],
+    "note": "右臂 TCP，base_link 参考。参考 TCP 姿态离单位阵仅约 6.072°，因此吸附到精确的 R=I（tcp x=+base x，tcp y=+base y，tcp z=+base z）。参考 joint6 距下限仅 0.0154 rad，为保证关节余量，TCP 沿 base +x 平移了 0.015 m；姿态仍严格横平竖直。左臂 TCP 为 y 取反的镜像。"
+  },
+  "source": {
+    "model": "refs/galbot_one_golf_description-main/mjcf/galbot_one_golf_fixed_base.xml",
+    "leg_joints_zero": true,
+    "reference_right_arm": [
+      -0.486,
+      -0.821,
+      0.699,
+      1.55,
+      2.43,
+      -0.72,
+      0.213
+    ],
+    "reference_tcp_position_m": [
+      0.499535,
+      -0.430559,
+      1.173098
+    ],
+    "reference_orientation_error_deg": 6.072,
+    "target_min_joint_limit_margin_rad": 0.03,
+    "position_search": [
+      {
+        "offset_x_m": 0.0,
+        "min_joint_limit_margin_rad": 0.006378,
+        "joint6_limit_margin_rad": 0.006378,
+        "position_error_mm": 0.00056,
+        "orientation_error_deg": 6.4e-05
+      },
+      {
+        "offset_x_m": 0.005,
+        "min_joint_limit_margin_rad": 0.01503,
+        "joint6_limit_margin_rad": 0.01503,
+        "position_error_mm": 0.000525,
+        "orientation_error_deg": 3.7e-05
+      },
+      {
+        "offset_x_m": 0.01,
+        "min_joint_limit_margin_rad": 0.023603,
+        "joint6_limit_margin_rad": 0.023603,
+        "position_error_mm": 0.000521,
+        "orientation_error_deg": 7.3e-05
+      },
+      {
+        "offset_x_m": 0.015,
+        "min_joint_limit_margin_rad": 0.032094,
+        "joint6_limit_margin_rad": 0.032094,
+        "position_error_mm": 0.000694,
+        "orientation_error_deg": 6.4e-05
+      }
+    ],
+    "solver": "mink 1.4.0 + daqp"
+  },
+  "verification": {
+    "right_position_error_mm": 0.000694,
+    "right_orientation_error_deg": 6.4e-05,
+    "min_joint_limit_margin_rad": 0.032094,
+    "joint6_limit_margin_rad": 0.032094,
+    "self_collision_count": 0
+  },
+  "todo": "上机前确认双手 TCP 帧与 left_gripper_tcp_link、right_gripper_tcp_link 一致。"
+}
